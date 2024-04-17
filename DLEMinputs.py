@@ -6,18 +6,26 @@ from glob import glob
 import os
 import pandas as pd
 from xclim import sdba
-from dask.distributed import Client
+from dask.distributed import Client, LocalCluster
+import dask_jobqueue
+import sys
 
 # Using CESM2LENS2 model run 1231 h1
 
 DLEM_DIR = '/mmfs1/data/valencig/DLEM4-final-project/data/DLEM/'
 MODEL_DIR = '/mmfs1/data/valencig/DLEM4-final-project/data/DLEM/CESM2LENS2/'
 
-def get_client():
+def get_client(basic=False):
+    if basic:
+        cluster = LocalCluster(
+            n_workers=4,
+            threads_per_worker=1,
+        )
+        return Client(cluster)
     # Create our NCAR Cluster - which uses PBSCluster under the hood
-    num_jobs = 10
+    num_jobs = 5
 
-    cluster = SLURMCluster(
+    cluster = dask_jobqueue.SLURMCluster(
         job_name='valencig_dask',
         cores=1,  # Total number of cores per job
         memory='10GB', # Total amount of memory per job
@@ -28,7 +36,7 @@ def get_client():
         # resource-spec: select=1:ncpus=128:mem=235GB
         # local_directory = '/glade/u/home/valencig/spilled/',
         # local_directory = '/glade/derecho/scratch/spilled/valencig/',
-        # log_directory = '/glade/u/home/valencig/worker-logs/',
+        log_directory = '/mmfs1/data/valencig/worker-logs/',
     )
 
     # Spin up workers
@@ -85,8 +93,9 @@ def load_data(model_name):
     files = glob(f'{MODEL_DIR}/{model_name}/*.nc')
     ds = xr.open_mfdataset(
         files,
-        chunks={'lat': 10, 'lon':10},
-    )
+        parallel=False,
+        #preprocess=lambda x: x.sel(lat=slice(25, 55), lon=slice(-125+360, -60+360))
+    )#.chunk({'lat': 10, 'lon':10})
     ds = ds.sel(lat=slice(25, 55), lon=slice(-125+360, -60+360))
     match model_name:
         case 'PRECC':
@@ -131,7 +140,7 @@ def load_DLEM(model_name, lons, lats, dlem_name):
         )
         arrays.append(ds)
     # Concatenate the arrays
-    combined = xr.concat(arrays, dim='time').chunk({'lat':10, 'lon':10})
+    combined = xr.concat(arrays, dim='time')#.chunk({'lat':10, 'lon':10})
     return combined
 
 def interpolate_data(da, mask, lons, lats, no_data_value):
@@ -147,16 +156,17 @@ def interpolate_data(da, mask, lons, lats, no_data_value):
     Returns:
         xr.DataArray: Interpolated and masked data.
     """
-    new_data = da.cf.interp(longitude=lons, latitude=lats, method='cubic').chunk({'lat':10, 'lon':10})
+    new_data = da.cf.interp(longitude=lons, latitude=np.flip(lats), method='cubic')#.chunk({'lat':10, 'lon':10})
     # Add mask to dataset
     new_data['mask'] = (('lat', 'lon'), mask)
     # Set values of the mask to no_data_value
-    applied_mask = new_data.where(mask!=no_data_value, no_data_value)
+    applied_mask = new_data.where(mask!=no_data_value, other=no_data_value)
     # Remove mask
     drop_mask = applied_mask.drop_vars('mask')
     return drop_mask
 
 def bias_correct(da, da_ref, dlem_name):
+    ## USE DAY OF YEAR???????
     match dlem_name:
         case 'pr':
             # Local Intensity Scaling (LOCI) bias-adjustment.
@@ -180,15 +190,17 @@ def save_data(data, dlem_name, n_lon, n_lat):
     Returns:
         boolean: True.
     """
+    # Remove 2015 it is bad
+    data = data.sel(T=slice(None, '2015'))
     # Save data to file
-    data = data.compute()
-    xr.write_netcdf(data, f'{DLEM_DIR}/{dlem_name}/{dlem_name}.nc')
+    data.to_netcdf(f'{DLEM_DIR}/{dlem_name}/{dlem_name}.nc')
     # Loop over years
     for year in range(data.cf['T'].dt.year.values.min(), data.cf['T'].dt.year.values.max()+1):
         # Extract array
-        year_da = data.cf.sel(T=str(year))
-        assert year_da.dtype == np.float32, "Data not 8 byte float"
-        assert year_da.cf['T'].size == 365, "Data not 365 days"
+        year_da = data.cf.sel(T=str(year)).astype(np.float32)
+        print(year_da.max())
+        # assert year_da.dtype == np.float32, "Data not 8 byte float"
+        # assert year_da.cf['T'].size == 365, "Data not 365 days"
         # Reshape to 1D (finally load data)
         reshaped = year_da.values.reshape([n_lon*n_lat*365, 1])
         # Save to file
@@ -197,7 +209,7 @@ def save_data(data, dlem_name, n_lon, n_lat):
 
 def process_DLEM_inputs():
     # Create a dask client
-    client = get_client()
+    client = get_client(basic=True)
     print(f'Dask client created: {client.dashboard_link}')
     # Step 1: Load the interpolation grid
     n_lon, n_lat, lons, lats, no_data_value = create_interpolation_grid()
@@ -213,14 +225,20 @@ def process_DLEM_inputs():
         tmin='TSMN',    # Minimum Temperature [Celcius]
     )
     print(f'Directories containing binaries will be created in `{DLEM_DIR}`')
-    for dlem_name, model_name in tqdm(variables.items(), desc='Processing DLEM inputs'):
+    for dlem_name, model_name in tqdm(variables.items(), desc='Processing DLEM inputs', file=sys.stdout):
         if not os.path.exists(f'{DLEM_DIR}/{dlem_name}'):
             os.makedirs(f'{DLEM_DIR}/{dlem_name}')
+        print('Loading data...')
         da = load_data(model_name)
+        da = da.persist()
         # da_ref = load_DLEM(model_name, lons, lats, dlem_name)
+        print('Interpolating data...')
         data = interpolate_data(da, mask, lons, lats, no_data_value)
+        print('Computing data...')
+        data = data.persist().compute()
         # Bias correct step!
         # data_corrected = bias_correct(data, da_ref)
+        print('Saving data...')
         save_data(data, dlem_name, n_lon, n_lat)
     client.shutdown()
     return True

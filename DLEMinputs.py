@@ -10,8 +10,36 @@ from dask.distributed import Client
 
 # Using CESM2LENS2 model run 1231 h1
 
-DLEM_DIR = '/Volumes/valencig@bc/DLEM/'
-MODEL_DIR = '/Volumes/valencig@bc/DLEM/CESM2LENS2/'
+DLEM_DIR = '/mmfs1/data/valencig/DLEM4-final-project/data/DLEM/'
+MODEL_DIR = '/mmfs1/data/valencig/DLEM4-final-project/data/DLEM/CESM2LENS2/'
+
+def get_client():
+    # Create our NCAR Cluster - which uses PBSCluster under the hood
+    num_jobs = 10
+
+    cluster = SLURMCluster(
+        job_name='valencig_dask',
+        cores=1,  # Total number of cores per job
+        memory='10GB', # Total amount of memory per job
+        processes=1, # Number of Python processes per job
+        # interface='hsn0', # Network interface to use like eth0 or ib0
+        # queue='main',
+        walltime='01:00:00',
+        # resource-spec: select=1:ncpus=128:mem=235GB
+        # local_directory = '/glade/u/home/valencig/spilled/',
+        # local_directory = '/glade/derecho/scratch/spilled/valencig/',
+        # log_directory = '/glade/u/home/valencig/worker-logs/',
+    )
+
+    # Spin up workers
+    cluster.scale(num_jobs)
+
+    # Assign the cluster to our Client
+    client = Client(cluster)
+
+    # Block progress until workers have spawned
+    client.wait_for_workers(num_jobs)
+    return client
 
 def create_interpolation_grid():
     """Create the interpolation grid for the DLEM model
@@ -169,7 +197,7 @@ def save_data(data, dlem_name, n_lon, n_lat):
 
 def process_DLEM_inputs():
     # Create a dask client
-    client = Client()
+    client = get_client()
     print(f'Dask client created: {client.dashboard_link}')
     # Step 1: Load the interpolation grid
     n_lon, n_lat, lons, lats, no_data_value = create_interpolation_grid()

@@ -96,7 +96,7 @@ def load_data(model_name):
         parallel=False,
         #preprocess=lambda x: x.sel(lat=slice(25, 55), lon=slice(-125+360, -60+360))
     )#.chunk({'lat': 10, 'lon':10})
-    ds = ds.sel(lat=slice(25, 55), lon=slice(-125+360, -60+360))
+    ds = ds.sel(lat=slice(25, 55), lon=slice(-125+360, -60+360), time=slice(None, '2015'))
     match model_name:
         case 'PRECC':
             # Convert from m/s to mm/day
@@ -190,8 +190,6 @@ def save_data(data, dlem_name, n_lon, n_lat):
     Returns:
         boolean: True.
     """
-    # Remove 2015 it is bad
-    data = data.sel(T=slice(None, '2015'))
     # Save data to file
     data.to_netcdf(f'{DLEM_DIR}/{dlem_name}/{dlem_name}.nc')
     # Loop over years

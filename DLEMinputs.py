@@ -7,47 +7,21 @@ import os
 import pandas as pd
 from xclim import sdba
 from dask.distributed import Client, LocalCluster
-import dask_jobqueue
 import sys
 
 # Using CESM2LENS2 model run 1231 h1
 
 DLEM_DIR = '/mmfs1/data/valencig/DLEM4-final-project/data/DLEM/'
 MODEL_DIR = '/mmfs1/data/valencig/DLEM4-final-project/data/DLEM/CESM2LENS2/'
+# DLEM_DIR = '/Users/ilanvalencius/Documents/PhD-courses/2-Global-Sustainability/final-project/'
+# MODEL_DIR = '/Users/ilanvalencius/Documents/PhD-courses/2-Global-Sustainability/final-project/testing/'
 
-def get_client(basic=False):
-    if basic:
-        cluster = LocalCluster(
-            n_workers=4,
-            threads_per_worker=1,
-        )
-        return Client(cluster)
-    # Create our NCAR Cluster - which uses PBSCluster under the hood
-    num_jobs = 5
-
-    cluster = dask_jobqueue.SLURMCluster(
-        job_name='valencig_dask',
-        cores=1,  # Total number of cores per job
-        memory='10GB', # Total amount of memory per job
-        processes=1, # Number of Python processes per job
-        # interface='hsn0', # Network interface to use like eth0 or ib0
-        # queue='main',
-        walltime='01:00:00',
-        # resource-spec: select=1:ncpus=128:mem=235GB
-        # local_directory = '/glade/u/home/valencig/spilled/',
-        # local_directory = '/glade/derecho/scratch/spilled/valencig/',
-        log_directory = '/mmfs1/data/valencig/worker-logs/',
+def get_client():
+    cluster = LocalCluster(
+        n_workers=4,
+        threads_per_worker=1,
     )
-
-    # Spin up workers
-    cluster.scale(num_jobs)
-
-    # Assign the cluster to our Client
-    client = Client(cluster)
-
-    # Block progress until workers have spawned
-    client.wait_for_workers(num_jobs)
-    return client
+    return Client(cluster)
 
 def create_interpolation_grid():
     """Create the interpolation grid for the DLEM model
@@ -94,15 +68,14 @@ def load_data(model_name):
     ds = xr.open_mfdataset(
         files,
         parallel=False,
-        #preprocess=lambda x: x.sel(lat=slice(25, 55), lon=slice(-125+360, -60+360))
-    )#.chunk({'lat': 10, 'lon':10})
-    ds = ds.sel(lat=slice(25, 55), lon=slice(-125+360, -60+360), time=slice(None, '2015'))
+    )
+    ds = ds.sel(lat=slice(20, 55), lon=slice(-130+360, -60+360), time=slice(None, '2015'))
     match model_name:
         case 'PRECC':
             # Convert from m/s to mm/day
             ds = ds * 86400000
             ds = ds.assign_attrs(units='mm/day')
-        case 'TS', 'TSMX', 'TSMN':
+        case 'TS' | 'TSMX' | 'TSMN':
             # Convert from K to Celcius
             ds = ds - 273.15
             ds = ds.assign_attrs(units='Celcius')
@@ -143,7 +116,7 @@ def load_DLEM(model_name, lons, lats, dlem_name):
     combined = xr.concat(arrays, dim='time')#.chunk({'lat':10, 'lon':10})
     return combined
 
-def interpolate_data(da, mask, lons, lats, no_data_value):
+def interpolate_data(da, model_name, mask, lons, lats, no_data_value):
     """Downsample the model data to 5km grid.
 
     Args:
@@ -156,7 +129,16 @@ def interpolate_data(da, mask, lons, lats, no_data_value):
     Returns:
         xr.DataArray: Interpolated and masked data.
     """
-    new_data = da.cf.interp(longitude=lons, latitude=np.flip(lats), method='cubic')#.chunk({'lat':10, 'lon':10})
+    match model_name:
+        case 'FSA':
+            method = 'nearest'
+        case _:
+            method = 'linear'
+    new_data = da.cf.interp(
+        longitude=lons,
+        latitude=lats,
+        method=method
+    )#.chunk({'lat':10, 'lon':10})
     # Add mask to dataset
     new_data['mask'] = (('lat', 'lon'), mask)
     # Set values of the mask to no_data_value
@@ -207,7 +189,7 @@ def save_data(data, dlem_name, n_lon, n_lat):
 
 def process_DLEM_inputs():
     # Create a dask client
-    client = get_client(basic=True)
+    client = get_client()
     print(f'Dask client created: {client.dashboard_link}')
     # Step 1: Load the interpolation grid
     n_lon, n_lat, lons, lats, no_data_value = create_interpolation_grid()
@@ -231,7 +213,7 @@ def process_DLEM_inputs():
         da = da.persist()
         # da_ref = load_DLEM(model_name, lons, lats, dlem_name)
         print('Interpolating data...')
-        data = interpolate_data(da, mask, lons, lats, no_data_value)
+        data = interpolate_data(da, model_name, mask, lons, lats, no_data_value)
         print('Computing data...')
         data = data.persist().compute()
         # Bias correct step!

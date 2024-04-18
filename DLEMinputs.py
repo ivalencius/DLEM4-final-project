@@ -11,17 +11,43 @@ import sys
 
 # Using CESM2LENS2 model run 1231 h1
 
-DLEM_DIR = '/mmfs1/data/valencig/DLEM4-final-project/data/DLEM/'
-MODEL_DIR = '/mmfs1/data/valencig/DLEM4-final-project/data/DLEM/CESM2LENS2/'
+# DLEM_DIR = '/mmfs1/data/valencig/DLEM4-final-project/data/DLEM/'
+# MODEL_DIR = '/mmfs1/data/valencig/DLEM4-final-project/data/DLEM/CESM2LENS2/'
+DLEM_DIR = '/glade/work/valencig/DLEM/inputs/'
+MODEL_DIR = '/glade/work/valencig/DLEM/CESM2LENS2'
 # DLEM_DIR = '/Users/ilanvalencius/Documents/PhD-courses/2-Global-Sustainability/final-project/'
 # MODEL_DIR = '/Users/ilanvalencius/Documents/PhD-courses/2-Global-Sustainability/final-project/testing/'
 
-def get_client():
-    cluster = LocalCluster(
-        n_workers=4,
-        threads_per_worker=1,
-    )
-    return Client(cluster)
+def get_client(ncar=False):
+    if ncar:
+        # Create our NCAR Cluster - which uses PBSCluster under the hood
+        num_jobs = 10
+        
+        cluster = PBSCluster(
+            job_name='valencig_dask',
+            cores=1,  # Total number of cores per job
+            memory='10GB', # Total amount of memory per job
+            processes=1, # Number of Python processes per job
+            interface='hsn0', # Network interface to use like eth0 or ib0
+            queue='main',
+            walltime='02:00:00',
+            # resource-spec: select=1:ncpus=128:mem=235GB
+            # local_directory = '/glade/u/home/valencig/spilled/',
+            local_directory = '/glade/derecho/scratch/spilled/valencig/',
+            log_directory = '/glade/u/home/valencig/worker-logs/',
+        )
+        # Spin up workers
+        cluster.scale(num_jobs)
+        # Assign the cluster to our Client
+        client = Client(cluster)
+        # Block progress until workers have spawned
+        return client.wait_for_workers(num_jobs)
+    else:
+        cluster = LocalCluster(
+            n_workers=4,
+            threads_per_worker=1,
+        )
+        return Client(cluster)
 
 def create_interpolation_grid():
     """Create the interpolation grid for the DLEM model
@@ -69,7 +95,7 @@ def load_data(model_name):
         files,
         parallel=False,
     )
-    ds = ds.sel(lat=slice(20, 55), lon=slice(-130+360, -60+360), time=slice(None, '2015'))
+    ds = ds.sel(lat=slice(20, 55), lon=slice(-130+360, -60+360), time=slice(None, '2014'))
     match model_name:
         case 'PRECC':
             # Convert from m/s to mm/day
@@ -173,12 +199,11 @@ def save_data(data, dlem_name, n_lon, n_lat):
         boolean: True.
     """
     # Save data to file
-    data.to_netcdf(f'{DLEM_DIR}/{dlem_name}/{dlem_name}.nc')
+    data.to_netcdf(f'{DLEM_DIR}/{dlem_name}.nc')
     # Loop over years
     for year in range(data.cf['T'].dt.year.values.min(), data.cf['T'].dt.year.values.max()+1):
         # Extract array
         year_da = data.cf.sel(T=str(year)).astype(np.float32)
-        print(year_da.max())
         # assert year_da.dtype == np.float32, "Data not 8 byte float"
         # assert year_da.cf['T'].size == 365, "Data not 365 days"
         # Reshape to 1D (finally load data)
